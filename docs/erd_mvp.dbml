@@ -1,0 +1,246 @@
+// =====================================================================
+// Warehouse Ops Platform — MVP ERD (8 tables)
+// Phase 1 (weeks 1–2). Invoices, invoice lines, tracking numbers and
+// credit memos are deferred to phase 2 (weeks 3–4), see erd_full.dbml.
+//
+// Money columns: declared as decimal(10,2) here. In SQLite they are
+// stored as TEXT and converted to Decimal in Python (SQLite has no real
+// DECIMAL type; storing as REAL would reintroduce float errors).
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// Enums (allowed values)
+// ---------------------------------------------------------------------
+
+Enum user_role {
+  ADMIN
+  SUPERVISOR
+  WAREHOUSE_ASSOCIATE
+  SALES
+  ACCOUNTING
+}
+
+Enum location_type {
+  RECEIVING
+  RESERVE
+  PICKING
+  SHIPPING
+  RETURNS
+}
+
+Enum order_type {
+  REGULAR
+  MARKETING [note: 'Giveaways / marketing orders, usually at price 0']
+}
+
+Enum order_status {
+  OPEN
+  PARTIALLY_SHIPPED
+  SHIPPED
+  CANCELLED
+}
+
+Enum discount_type {
+  PERCENT
+  FIXED_AMOUNT
+}
+
+Enum movement_type {
+  RECEIPT              [note: 'From supplier. from: NULL, to: required']
+  SHIPMENT             [note: 'To customer. from: required, to: NULL']
+  TRANSFER             [note: 'Between locations. from: required, to: required']
+  ADJUSTMENT_INCREASE  [note: 'Inventory adjustment up. from: NULL, to: required']
+  ADJUSTMENT_DECREASE  [note: 'Inventory adjustment down. from: required, to: NULL']
+  CUSTOMER_RETURN      [note: 'Returned by customer. from: NULL, to: required']
+}
+
+
+// ---------------------------------------------------------------------
+// Tables
+// ---------------------------------------------------------------------
+
+Table users {
+  user_id      integer    [pk, increment]
+  user_name    varchar    [not null, unique]
+  role         user_role  [not null]
+  is_active    boolean    [not null, default: true]
+  created_at   timestamp  [not null]
+}
+
+Table products {
+  product_id       integer        [pk, increment]
+  sku              varchar        [not null, unique, note: 'Natural key; can change without breaking FKs']
+  name             varchar        [not null]
+  description      text
+  category         varchar        [not null]
+  price            decimal(10,2)  [not null, note: 'List price. 0 is valid (marketing items)']
+  msrp             decimal(10,2)
+  production_cost  decimal(10,2)
+  is_taa_eligible  boolean        [not null, default: false, note: 'Only TAA customers can buy TAA-restricted products']
+  created_at       timestamp      [not null]
+  updated_at       timestamp
+
+  Note: '''
+  Rules:
+  - price >= 0
+  - msrp >= 0 (if present)
+  - production_cost >= 0 (if present)
+  '''
+}
+
+Table customers {
+  customer_id              integer        [pk, increment]
+  account_number           varchar        [not null, unique]
+  name                     varchar        [not null]
+  license_number           varchar
+  license_expires_on       date           [note: 'License validity is calculated vs. today, not stored as a boolean']
+  is_active                boolean        [not null, default: true]
+  is_distributor           boolean        [not null, default: false]
+  is_taa_eligible          boolean        [not null, default: false, note: 'TAA customers can buy TAA products and get specific discounts']
+
+  contact_name             varchar
+  primary_email_address    varchar        [not null]
+  secondary_email_address  varchar
+  main_phone_number        varchar        [not null]
+  secondary_phone_number   varchar
+
+  shipping_street          varchar
+  shipping_suite           varchar
+  shipping_city            varchar
+  shipping_state           varchar
+  shipping_zip_code        varchar
+
+  billing_street           varchar
+  billing_suite            varchar
+  billing_city             varchar
+  billing_state            varchar
+  billing_zip_code         varchar
+
+  regular_discount_type    discount_type
+  regular_discount_value   decimal(10,2)
+
+  created_at               timestamp      [not null]
+  created_by               integer        [ref: > users.user_id]
+  updated_at               timestamp
+
+  Note: '''
+  Rules:
+  - regular_discount_type and regular_discount_value are both NULL or both set
+  - if PERCENT: 0 < regular_discount_value <= 100
+  - if FIXED_AMOUNT: regular_discount_value > 0
+  '''
+}
+
+Table locations {
+  location_id    integer        [pk, increment]
+  location_code  varchar        [not null, unique]
+  zone           varchar
+  aisle          varchar
+  shelf          varchar
+  bin            varchar
+  location_type  location_type  [not null]
+  is_active      boolean        [not null, default: true]
+
+  Note: 'Describes only the physical place. What is stored there lives in inventory.'
+}
+
+Table inventory {
+  inventory_id  integer    [pk, increment]
+  product_id    integer    [not null, ref: > products.product_id]
+  location_id   integer    [not null, ref: > locations.location_id]
+  quantity      integer    [not null, default: 0]
+  updated_at    timestamp
+
+  indexes {
+    (product_id, location_id) [unique]
+  }
+
+  Note: '''
+  Current stock per product per location (N:M between products and locations).
+  Rules:
+  - quantity >= 0
+  - PENDING DECISION (question 3): stored state vs. derived from inventory_movements
+  '''
+}
+
+Table orders {
+  order_id            integer       [pk, increment]
+  sales_order_number  varchar       [not null, unique]
+  customer_id         integer       [not null, ref: > customers.customer_id]
+  order_type          order_type    [not null, default: 'REGULAR']
+  order_status        order_status  [not null, default: 'OPEN']
+
+  shipping_street     varchar       [note: 'Snapshot of the address at order time']
+  shipping_suite      varchar
+  shipping_city       varchar
+  shipping_state      varchar
+  shipping_zip_code   varchar
+
+  billing_street      varchar       [note: 'Snapshot of the address at order time']
+  billing_suite       varchar
+  billing_city        varchar
+  billing_state       varchar
+  billing_zip_code    varchar
+
+  created_at          timestamp     [not null]
+  created_by          integer       [not null, ref: > users.user_id]
+  updated_at          timestamp
+}
+
+Table order_lines {
+  order_line_id     integer        [pk, increment]
+  order_id          integer        [not null, ref: > orders.order_id]
+  product_id        integer        [not null, ref: > products.product_id]
+
+  ordered_quantity  integer        [not null]
+
+  unit_price        decimal(10,2)  [not null, note: 'Snapshot of products.price at order time']
+  unit_msrp         decimal(10,2)  [note: 'Snapshot of products.msrp at order time']
+  discount_type     discount_type
+  discount_value    decimal(10,2)
+  discount_amount   decimal(10,2)  [not null, default: 0]
+  final_unit_price  decimal(10,2)  [not null, note: 'Snapshot: unit_price - discount_amount']
+
+  created_at        timestamp      [not null]
+  updated_at        timestamp
+
+  indexes {
+    (order_id, product_id) [unique]
+  }
+
+  Note: '''
+  Rules:
+  - ordered_quantity > 0
+  - unit_price >= 0, final_unit_price >= 0
+  - discount_amount >= 0 and discount_amount <= unit_price
+  - discount_type and discount_value are both NULL or both set
+  Shipped quantity is NOT stored: it is calculated from
+  inventory_movements (movement_type = SHIPMENT) for this order and product.
+  '''
+}
+
+Table inventory_movements {
+  movement_id       integer        [pk, increment]
+  product_id        integer        [not null, ref: > products.product_id]
+  movement_type     movement_type  [not null]
+  quantity          integer        [not null]
+
+  from_location_id  integer        [ref: > locations.location_id]
+  to_location_id    integer        [ref: > locations.location_id]
+
+  order_id          integer        [ref: > orders.order_id, note: 'Required for SHIPMENT; optional for CUSTOMER_RETURN; NULL otherwise. Phase 2: replaced by invoice_id / credit_memo_id']
+  user_id           integer        [not null, ref: > users.user_id]
+
+  reference         varchar        [note: 'External document, e.g. supplier PO or adjustment ticket']
+  moved_at          timestamp      [not null]
+  notes             text
+
+  Note: '''
+  Append-only history: one row per movement, never updated or deleted.
+  Rules:
+  - quantity > 0 (direction is given by from/to, not by the sign)
+  - from_location_id / to_location_id required or NULL depending on movement_type (see enum notes)
+  - TRANSFER: from_location_id <> to_location_id
+  '''
+}
