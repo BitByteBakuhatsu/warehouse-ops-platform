@@ -158,9 +158,18 @@ Table inventory {
 
   Note: '''
   Current stock per product per location (N:M between products and locations).
+  DECISION: stored state + movement history (both).
+  - inventory is the source of truth for current stock (fast reads).
+  - inventory_movements is the append-only audit trail.
+  - Every movement updates inventory in the SAME transaction (atomicity).
+  - Stock is never inserted directly: initial stock enters as RECEIPT or ADJUSTMENT_INCREASE.
+  Effect per movement_type:
+  - RECEIPT, ADJUSTMENT_INCREASE, CUSTOMER_RETURN: +quantity at to_location
+  - SHIPMENT, ADJUSTMENT_DECREASE: -quantity at from_location
+  - TRANSFER: -quantity at from_location, +quantity at to_location
+  Invariant: inventory.quantity = SUM(in) - SUM(out) from inventory_movements.
   Rules:
-  - quantity >= 0
-  - PENDING DECISION (question 3): stored state vs. derived from inventory_movements
+  - quantity >= 0 (a movement that would make stock negative fails and rolls back)
   '''
 }
 
